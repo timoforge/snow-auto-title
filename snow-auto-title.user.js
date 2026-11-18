@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         随对话更新会话标题
-// @version      1.0.0
+// @version      1.0.1
 // @description  每轮对话结束后自动把会话标题改成能概括聊天内容的名字；也可以右键手动「AI 重命名」。
 // @icon         data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgcm9sZT0iaW1nIiBhcmlhLWxhYmVsPSLpmo/lr7nor53mm7TmlrDkvJror53moIfpopgiPgogIDxyZWN0IHg9IjMyIiB5PSIzMiIgd2lkdGg9IjQ0OCIgaGVpZ2h0PSI0NDgiIHJ4PSIxMTYiIGZpbGw9IiMyNTYzRUIiLz4KICA8cmVjdCB4PSIxMjAiIHk9IjE1MiIgd2lkdGg9IjI3MiIgaGVpZ2h0PSIxNzYiIHJ4PSIzMiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkZGRkZGIiBzdHJva2Utd2lkdGg9IjI2Ii8+CiAgPHJlY3QgeD0iMTY4IiB5PSIyMDgiIHdpZHRoPSIxNzYiIGhlaWdodD0iMjQiIHJ4PSIxMiIgZmlsbD0iI0ZGRkZGRiIvPgogIDxyZWN0IHg9IjE2OCIgeT0iMjU2IiB3aWR0aD0iMTEyIiBoZWlnaHQ9IjI0IiByeD0iMTIiIGZpbGw9IiNGRkZGRkYiIG9wYWNpdHk9IjAuNyIvPgogIDxjaXJjbGUgY3g9IjM5MiIgY3k9IjM2MCIgcj0iNDYiIGZpbGw9IiMwRjlGOEYiLz4KICA8cGF0aCBkPSJNMzcyIDM2MCBsMTQgMTQgbDI0IC0yOCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkZGRkZGIiBzdHJva2Utd2lkdGg9IjEzIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KPC9zdmc+Cg==
 // @author       Timofey
@@ -11,7 +11,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
-// @snow-privacy conversations, messages, apiKeys, customHeaders
+// @snow-privacy conversations, messages, apiKeys, customHeaders, network
 // ==/UserScript==
 
 /* 随对话更新会话标题 · 单一客户端脚本
@@ -25,7 +25,8 @@
  *   → 生成标题（AI 优先、失败回退规则）→ conversations.rename 写回。
  *
  * 隐私：只读会话列表/消息摘要、API 档案与其绑定的自定义请求头方案；只写会话标题；
- * 跳过 sub-* 子代理会话；不碰消息内容、项目文件与系统提示词。
+ * 通过网络把抽样后的对话片段发送给该档案的模型服务；跳过 sub-* 子代理会话；
+ * 不碰消息内容、项目文件与系统提示词。
  */
 
 (function () {
@@ -88,6 +89,7 @@
       autoOff: "自动命名已关闭",
       runCount: "已自动命名 {{count}} 次",
       noState: "还没有自动命名的记录",
+      sameTitle: "标题已是当前内容最合适的名字，可直接改字或重新生成",
     },
     "zh-TW": {
       menu: "AI 重新命名",
@@ -124,6 +126,7 @@
       autoOff: "自動命名已關閉",
       runCount: "已自動命名 {{count}} 次",
       noState: "還沒有自動命名的記錄",
+      sameTitle: "標題已是目前內容最合適的名稱，可直接改字或重新產生",
     },
     en: {
       menu: "Rename with AI",
@@ -160,6 +163,7 @@
       autoOff: "Auto naming off",
       runCount: "Auto-named {{count}} times",
       noState: "No auto-naming record yet",
+      sameTitle: "This is already the best title for the content — edit it or regenerate",
     },
   };
 
@@ -279,8 +283,10 @@
   function truncateTitle(value, limit) {
     const chars = Array.from(String(value == null ? "" : value));
     if (chars.length <= limit) return chars.join("");
+    // 省略号也占 1 个字符预算：截断结果（含 "…"）总长不超过 limit
+    const budget = Math.max(2, limit - 1);
     const isWordChar = (ch) => Boolean(ch) && /[A-Za-z0-9]/.test(ch);
-    let cutLength = limit;
+    let cutLength = budget;
     if (isWordChar(chars[cutLength - 1]) && isWordChar(chars[cutLength])) {
       let boundary = -1;
       for (let i = cutLength - 1; i >= 0; i -= 1) {
@@ -289,7 +295,7 @@
           break;
         }
       }
-      if (boundary >= 0 && boundary >= Math.floor(limit * 0.6)) cutLength = boundary;
+      if (boundary >= 0 && boundary >= Math.floor(budget * 0.6)) cutLength = boundary;
     }
     const head = chars
       .slice(0, cutLength)
@@ -298,7 +304,7 @@
     // 末尾若停在中文虚词上（"…a/b/c 的…"），去掉再补省略号
     let trimmed = head;
     const softTail = /[的了着过和与及]$/;
-    while (trimmed.length > Math.floor(limit * 0.6) && softTail.test(trimmed.slice(-1))) {
+    while (trimmed.length > Math.floor(budget * 0.6) && softTail.test(trimmed.slice(-1))) {
       trimmed = trimmed.slice(0, -1).replace(/[\s\-/]+$/, "");
     }
     return trimmed + "…";
@@ -831,10 +837,22 @@
 
     const candidate = await generateCandidate(context, conversationId, settings);
     const title = cleanTitle(candidate.title, settings.maxChars);
-    if (!title || title === currentTitle) {
+    if (!title) {
+      // 拿不到可用标题（生成失败 / 输出不可用）才算一次连续失败
       state.conversations[conversationId] = Object.assign({}, record, {
         at: Date.now(),
         attempts: attempts + 1,
+        messageCount,
+      });
+      writeState(state);
+      return;
+    }
+    if (title === currentTitle) {
+      // 标题未变化不是失败：只推进 messageCount / 时间戳，避免 3 轮后误判停摆 30 分钟
+      state.conversations[conversationId] = Object.assign({}, record, {
+        lastTitle: title,
+        at: Date.now(),
+        attempts,
         messageCount,
       });
       writeState(state);
@@ -930,15 +948,21 @@
 
   function readConversationId(menu) {
     if (!menu) return "";
+    let sawSnowAttribute = false;
     for (const attr of Array.from(menu.attributes || [])) {
       if (!/^data-snow-/i.test(attr.name)) continue;
+      sawSnowAttribute = true;
       const value = String(attr.value || "");
       if (/^(?:conv|sub)-/i.test(value)) return value;
-      if (/conversation/i.test(attr.name) && value) return value;
+      // 只认精确的会话 id 属性；不要泛匹配 data-snow-conversation-*（会命中 -title / -count 等）
+      if (/^data-snow-conversation-id$/i.test(attr.name) && value) return value;
     }
     const direct = menu.getAttribute("data-snow-conversation-id");
     if (direct) return direct;
-    const context = window.snow && snow.context;
+    // 只有完全没有任何 data-snow-* 标记时才退回当前会话；
+    // 有标记却认不出 id，说明不是可识别的会话菜单 —— 宁可跳过，也不要改错会话
+    if (sawSnowAttribute) return "";
+    const context = typeof snow !== "undefined" && snow ? snow.context : null;
     return (context && context.conversationId) || "";
   }
 
@@ -1103,7 +1127,7 @@
 
   async function runRename(conversationId) {
     if (isSubId(conversationId)) return;
-    if (!window.snow || !snow.metadata || !snow.write) {
+    if (typeof snow === "undefined" || !snow || !snow.metadata || !snow.write) {
       log("host API unavailable");
       return;
     }
@@ -1162,17 +1186,26 @@
 
     current.textContent = context.currentTitle ? t("current") + "：" + context.currentTitle : "";
 
+    const isSameAsCurrent = (value) => Boolean(value) && value === context.currentTitle;
+
     const generate = async () => {
       message.textContent = t("generating");
       setBusy(true);
       const candidate = await generateCandidate(context, conversationId, settings);
       if (!layerRefs) return;
-      input.value = candidate.title || "";
+      const title = candidate.title || "";
+      input.value = title;
       refs.badge.hidden = !candidate.source;
       refs.badge.textContent = candidate.source || "";
-      message.textContent = candidate.error ? t("failed") + clipText(candidate.error, 160) : "";
+      const same = isSameAsCurrent(title);
+      message.textContent = same
+        ? t("sameTitle")
+        : candidate.error
+          ? t("failed") + clipText(candidate.error, 160)
+          : "";
       setBusy(false);
-      applyButton.disabled = !candidate.title;
+      // 与当前标题相同时禁用「应用」；输入框仍可改字，改完自动恢复
+      applyButton.disabled = !title || same;
       input.focus({ preventScroll: true });
       input.select();
     };
@@ -1188,6 +1221,11 @@
         removeLayer();
       }
     });
+    // 手动改字后恢复「应用」；改回旧标题则再次禁用
+    input.addEventListener("input", () => {
+      const value = String(input.value || "").trim();
+      applyButton.disabled = !value || isSameAsCurrent(value);
+    });
 
     applyButton.onclick = async () => {
       const rawText = String(input.value || "").trim();
@@ -1199,6 +1237,11 @@
       }
       if (total > settings.maxChars) {
         message.textContent = fill(t("trimmed"), { limit: settings.maxChars });
+      }
+      if (isSameAsCurrent(title)) {
+        message.textContent = t("sameTitle");
+        applyButton.disabled = true;
+        return;
       }
       setBusy(true);
       try {
@@ -1451,7 +1494,8 @@
 
   // 一次性自检：结果写进 GM 存储，便于排查注入与授权状态（延迟 3s，等订阅建立）
   setTimeout(async () => {
-    const report = { at: new Date().toISOString(), version: "1.0.0" };
+    const metaVersion = typeof GM_info !== "undefined" && GM_info.script ? GM_info.script.version : "";
+    const report = { at: new Date().toISOString(), version: String(metaVersion || "1.0.1") };
     try {
       report.locale = (snow.context && snow.context.locale) || "";
       const [domains, profileResponse] = await Promise.all([
